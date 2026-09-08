@@ -1375,6 +1375,20 @@ function isMoneyStage(s) { return MONEY_STAGES.indexOf(s) !== -1; }
 //    (moveCards 로 손수 옮기는 건 그대로 된다 — 막는 건 자동 이동뿐이다.)
 const NO_AUTO_TARGET_STAGES = MONEY_STAGES.concat(["기타"]);
 
+// ⛳ 재신청-제외 시작 — 이 구간은 scripts/test-gujo-reject.mjs 가 소스째 떼어내 실행한다.
+//    ⚠️ 마커 문구를 바꾸면 테스트가 통째로 죽는다. 무엇도 참조하지 말 것(순수해야 떼어낼 수 있다).
+//
+// 🚫 매달 재신청하는 프로그램이 아닌 기관 (2026-09-07)
+//    구조혁신&사업전환은 한 번 신청해 최종 결과(승인/부결)가 정해진다. 다른 기관처럼 매달
+//    다시 넣는 방식이 아니라서, 부결이어도 **재신청 체크리스트를 띄우거나 다음 달 건을
+//    만들면 안 된다** — 그냥 '부결' 상태로 남는 것이 맞다.
+//    ⚠️ 기존 재신청 로직(다른 기관용)은 한 줄도 안 건드린다. 이 명단만 흐름에서 빠진다.
+//    ⚠️ **명단이 늘면 여기 한 곳만 고친다.** 판정을 호출부에 흩으면 조용히 어긋난다.
+//    ⚠️ 모르는 값·빈 값은 false 다 — 기본은 "기존대로 재신청 흐름을 탄다".
+const REAPPLY_EXEMPT_GROUPS = ["구조혁신&사업전환"];
+function isReapplyExempt(g) { return REAPPLY_EXEMPT_GROUPS.indexOf(g) >= 0; }
+// ⛳ 재신청-제외 끝
+
 // 📖 번역표 — 확정본(2026-08-21). status_stage_map 보다 **이게 이긴다.**
 //    매핑표는 사람이 화면에서 고칠 수 있어, 확정 규칙을 거기 두면 조용히 바뀔 수 있다.
 const SYNC_CREATE_ONLY_STATUS = ["시작 전", "시작전"];  // ⚠️ 구조혁신은 띄어쓰기가 없다
@@ -1640,6 +1654,22 @@ function schedDateOf(note) {
 const WN_ADMINS = ["양호"];
 // 공유 그룹은 [미현, 인선] 한 쌍뿐이었는데 둘 다 명단에서 빠져 비었다. (2026-08-17)
 const WN_SHARE_GROUPS = []; // 서로 노트 열람 가능
+
+// ⛳ 주간정리-대상 시작 — 이 구간은 scripts/test-weekly-members.mjs 가 소스째 떼어내 실행한다.
+//    ⚠️ 마커 문구를 바꾸면 테스트가 통째로 죽는다. 무엇도 참조하지 말 것.
+//
+// 🗓️ 주간 정리 **자동 팝업**이 뜨는 사람 (2026-09-07)
+//    **이 배열이 유일한 원본 — 명단이 바뀌면 여기 한 곳만 고친다.**
+//    ⚠️ 관리자 여부와 무관하다. 정원은 role='admin' 이지만 대상이고, 양호는 아니다.
+//       "관리자 제외" 로 판정하면 정원이 잘못 빠진다.
+//    ⚠️ ASSIGNEES 를 재사용하지 말 것 — 그건 담당자 선택·필터 목록이라 의미가 다르고,
+//       거기 사람이 추가되면 팝업이 조용히 같이 켜진다.
+//    ⚠️ 이름은 profiles.name 과 정확히 같아야 한다. 틀리면 **아무에게도 안 뜨고 에러도 안 난다.**
+//    · 막는 것은 자동 팝업뿐이다. 상단 🗓️ 주간 정리 버튼은 전원 그대로 쓸 수 있고,
+//      업무노트 상단 🔴 밀린 미완료 구역도 전원에게 그대로 보인다(정보가 사라지지 않는다).
+const WEEKLY_REVIEW_MEMBERS = ["관호", "유진", "정원"];
+function isWeeklyReviewMember(name) { return WEEKLY_REVIEW_MEMBERS.indexOf(name) >= 0; }
+// ⛳ 주간정리-대상 끝
 // 🧑‍🤝‍🧑 팀 구성 — 팀 공지 "확인" 대상 명단 (팀별로 확인 인원이 다름)
 const TEAM_MEMBERS = {
   individual: ["양호", "동일", "관호", "지혜", "정원"], // 개인팀 (현애 제거 2026-08-17)
@@ -20934,6 +20964,11 @@ function WorkNotesView({ profile, onBadgeUpdate, openAction, onActionConsumed })
   useEffect(function() {
     if (loading || weeklyOpenedRef.current || showWeekly) return;
     var me = profile?.name; if (!me) return;
+    // 🗓️ 자동 팝업은 명단에 있는 사람에게만 (2026-09-07). 나머지는 상단 버튼으로 직접 연다.
+    //    ⚠️ 여기서만 막는다 — openWeeklyManually·모달·이월 실행부는 전원 그대로다.
+    //    ⚠️ weeklyOpenedRef 를 세우지 않는다. 세우면 이 세션에서 수동으로 연 뒤
+    //       다시 못 여는 게 아니라, 애초에 이 effect 가 하는 일이 없어 세울 이유가 없다.
+    if (!isWeeklyReviewMember(me)) return;
     var thisMon = mondayOf(todayStr);
     var last = localStorage.getItem(weeklyKey(weeklyMode, me));
     if (last && last >= thisMon) return;
@@ -26991,7 +27026,10 @@ function AgencyView({ jumpToMonth, jumpToGroup, jumpToYear }) {
   var GUJOHYEOK_STATUS_OPTIONS = [
     "시작전","서류 제출 완료","자가진단 완료","전문 위원 배정","전문 위원 실사 완료",
     "컨설턴트 신청 완료","컨설팅 진행중","컨설팅 최종 완료","승인 신청서 제출 완료",
-    "예산 소진으로 컨설턴트 보류","예산 소진으로 자금 신청 보류","사업전환 승인"
+    "예산 소진으로 컨설턴트 보류","예산 소진으로 자금 신청 보류","사업전환 승인",
+    // 🚫 최종 결과. 구조혁신은 매달 재신청이 없으므로 이 값을 골라도 재신청 체크리스트가
+    //    안 뜨고 다음 달 건도 안 생긴다(isReapplyExempt). '사업전환 승인' 과 짝이다.
+    "부결"
   ];
   var GUJOHYEOK_STATUS_COLORS = {
     "시작전":                       { bg: "#F7F6F3", text: "#888" },
@@ -27006,6 +27044,8 @@ function AgencyView({ jumpToMonth, jumpToGroup, jumpToYear }) {
     "예산 소진으로 컨설턴트 보류":  { bg: "#FAC775", text: "#412402" },
     "예산 소진으로 자금 신청 보류": { bg: "#FAC775", text: "#412402" },
     "사업전환 승인":                { bg: "#1D9E75", text: "#fff" },
+    // 다른 기관 부결과 같은 색이어야 한다(STATUS_COLORS_MAP). 빠뜨리면 회색 폴백으로 샌다.
+    "부결":                         { bg: "#FEF2F2", text: "#DC2626" },
   };
   var DELIVERED_DOCS_OPTIONS = ["부의 기업","승인신청서","전문위원 스크립트","컨설팅 스크립트","최종 스크립트"];
   var STATUS_OPTIONS = activeGroup === "구조혁신&사업전환"
@@ -27084,6 +27124,10 @@ function AgencyView({ jumpToMonth, jumpToGroup, jumpToYear }) {
 
   // ── 부결/반려 재신청 체크리스트 ──────────────────────────────────────
   var openReject = function(row) {
+    // 🚫 구조혁신&사업전환은 재신청 흐름이 없다 — 모달 자체를 안 연다(부결 상태로 그냥 남는다).
+    //    호출부(인라인 편집 saveEdit · 상세 모달 상태 버튼)를 안 고치려고 여기 한 곳에서 막는다.
+    //    → 앞으로 새 호출부가 생겨도 자동으로 같이 막힌다.
+    if (isReapplyExempt((row && row.agency_group) || activeGroup)) return;
     setRejectTarget(row);
     var saved = (row && typeof row.reject_checklist === "object" && row.reject_checklist) ? row.reject_checklist : {};
     setRejectChecks({
@@ -27117,7 +27161,8 @@ function AgencyView({ jumpToMonth, jumpToGroup, jumpToYear }) {
     };
     var per = null;
     // 재신청 의사 '예' → 원본 건의 다음달로 새 건 자동 생성
-    if (checklist.reapply_intent === "예") {
+    // ⚠️ 이중 방어. openReject 가 이미 막지만, 판정이 한 곳뿐이면 나중에 조용히 풀린다.
+    if (checklist.reapply_intent === "예" && !isReapplyExempt(rejectTarget.agency_group || activeGroup)) {
       per = nextApplyPeriod(rejectTarget.year, rejectTarget.month);
       var base = {
         agency_group: rejectTarget.agency_group || activeGroup,
@@ -27184,7 +27229,8 @@ function AgencyView({ jumpToMonth, jumpToGroup, jumpToYear }) {
   ];
   // ⚠️ 구조혁신&사업전환만 상태 어휘가 다르다 — "시작전"(띄어쓰기 없음), 나머지는 "시작 전".
   //    목적지 기관에 맞는 값을 써야 목적지 드롭다운에 없는 상태가 안 생긴다.
-  var isGujo = function(g) { return g === "구조혁신&사업전환"; };
+  // 판정을 두 벌로 두면 반드시 어긋난다 → 모듈 상단 명단 한 곳을 본다(⛳ 재신청-제외).
+  var isGujo = isReapplyExempt;
   var initialStatusFor = function(g) { return isGujo(g) ? "시작전" : "시작 전"; };
 
   var openBulk = function(mode) {
