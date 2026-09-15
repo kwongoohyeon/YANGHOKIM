@@ -44,3 +44,6 @@ yarn-error.log*
 
 # 배정DB 동기화 설정용 로컬 폴더 (공유 비밀키가 들어 있음 — 공개 저장소 커밋 금지)
 /배정DB_설정_로컬/
+
+# superpowers 작업공간(스크래치) — 커밋하지 않는다
+.superpowers/
