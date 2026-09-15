@@ -1042,6 +1042,38 @@ function annRegionState(coRegion, includeList) {
   if (sidoHit) return co.sigungu ? "fail" : "unknown";
   return "fail";
 }
+
+// 우리 industry 는 자유텍스트에 다중값이 흔하다("도소매업, 제조업, 건설업" — 실측 143건).
+// 콤마·슬래시·가운뎃점으로 쪼개 토큰 배열로 만든다.
+function annIndustryTokens(raw) {
+  return String(raw || "")
+    .split(/[,/·|]+/)
+    .map(function (t) { return t.trim(); })
+    .filter(Boolean);
+}
+
+// 업종 조건 판정.
+// ⚠️ 이 기능에서 제일 약한 고리다 — 우리에겐 KSIC 업종코드가 없고 자유텍스트 99종뿐이다.
+// ⚠️ **"걸린 게 없다"를 fail 로 만들지 말 것.** 그건 "아니다"가 아니라 "모른다"이다(설계 §7-2).
+//    금속가공업이 제조업인 줄 우리 코드는 모른다 — fail 로 두면 멀쩡한 업체가 조용히 사라진다.
+//    대신 추출 프롬프트가 include 키워드를 넉넉히(동의어·하위업종) 뽑게 해서 unknown 을 줄인다.
+// ⚠️ exclude 가 include 보다 세다. 둘 다 걸리면 fail 이다.
+function annIndustryState(coIndustry, industries) {
+  var inc = (industries && industries.include) || [];
+  var exc = (industries && industries.exclude) || [];
+  if (!inc.length && !exc.length) return "pass";        // 업종 조건이 없는 공고
+  var toks = annIndustryTokens(coIndustry);
+  if (!toks.length) return "unknown";                   // 우리 업종이 비어 있다
+  var hay = toks.join(" ");
+  var i;
+  for (i = 0; i < exc.length; i++) {
+    if (exc[i] && hay.indexOf(String(exc[i])) >= 0) return "fail";
+  }
+  for (i = 0; i < inc.length; i++) {
+    if (inc[i] && hay.indexOf(String(inc[i])) >= 0) return "pass";
+  }
+  return "unknown";
+}
 // ── ANN-ENGINE-END ──
 
 // 기관(중진공·소진공) 판정의 전제: 규모 판정이 확실해야 한다.

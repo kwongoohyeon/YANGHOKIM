@@ -24,6 +24,7 @@ console.log(`── 떼어낸 소스: 규모판정 ${bizSrc.trim().split("\n").l
 
 const EXPORTS = [
   "normRegion", "annTrimGu", "annDeeperThanCity", "annRegionState",
+  "annIndustryTokens", "annIndustryState",
 ];
 const mod = new Function(bizSrc + "\n" + annSrc + "\nreturn {" + EXPORTS.join(",") + "};")();
 
@@ -80,6 +81,27 @@ eq("여러 곳 중 하나 적중", S("경기_시흥", [{ sido: "서울특별시"
 eq("시 아래 구 한정",  S("경기_고양", [{ sido: "경기도", sigungu: "고양시 덕양구" }]), "unknown");
 // ⚠️ 광주 오탐 — 시도가 다르면 시군구가 같아도 불일치
 eq("광주 오탐 방지",   S("경기_광주", [{ sido: "광주광역시", sigungu: "" }]),      "fail");
+
+// ── annIndustryTokens ───────────────────────────────────────────────────────
+eq("단일 업종",   mod.annIndustryTokens("제조업"),                    ["제조업"]);
+eq("콤마 다중",   mod.annIndustryTokens("도소매업, 제조업, 건설업"),  ["도소매업", "제조업", "건설업"]);
+eq("슬래시 다중", mod.annIndustryTokens("도소매/통신기기 소매업"),    ["도소매", "통신기기 소매업"]);
+eq("빈 값",       mod.annIndustryTokens(""),                          []);
+
+// ── annIndustryState ────────────────────────────────────────────────────────
+const I = mod.annIndustryState;
+eq("업종 조건 없음", I("음식점업", { include: [], exclude: [] }),                  "pass");
+eq("조건 자체 null", I("음식점업", null),                                          "pass");
+eq("include 적중",   I("제조업", { include: ["제조"], exclude: [] }),              "pass");
+eq("다중값 중 적중", I("도소매업, 제조업", { include: ["제조"], exclude: [] }),    "pass");
+eq("exclude 적중",   I("유흥주점업", { include: ["서비스"], exclude: ["유흥"] }),  "fail");
+// ⚠️ exclude 가 include 보다 세다 — 둘 다 걸리면 fail
+eq("둘 다 걸림",     I("제조업, 유흥주점업", { include: ["제조"], exclude: ["유흥"] }), "fail");
+// ⚠️ "걸린 게 없다"는 "아니다"가 아니라 "모른다" — fail 이 아니다(설계 §7-2)
+eq("아무것도 안 걸림", I("음식점업", { include: ["제조"], exclude: [] }),          "unknown");
+eq("우리 업종 비어있음", I("", { include: ["제조"], exclude: [] }),                "unknown");
+// ⚠️ exclude 만 있는 공고 — "제외 대상이 아님"을 확정하지 않는다
+eq("exclude 만 있고 안 걸림", I("도소매업", { include: [], exclude: ["유흥"] }),   "unknown");
 
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass}/${pass + fail} 통과`);
 process.exit(fail === 0 ? 0 : 1);
