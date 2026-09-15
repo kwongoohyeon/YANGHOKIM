@@ -827,6 +827,8 @@ const REJECT_REASONS = [
 const JUNGINGONG_PRODUCTS = ["창업기반지원","청년창업자금","혁신성장지원","개발기술사업화","재창업","내수기업수출기업화(10만불 미만)","수출기업글로벌화(10만불 이상)","사업전환","구조개선","긴급경영 안정자금","기타"];
 const SOJINGONG_PRODUCTS = ["신용취약자금","재도전특별자금","혁신성장 촉진자금(스마트 기술)","혁신성장 촉진자금(2년 연속 매출 10% 신장)","혁신성장 촉진자금(수출 자금)","혁신성장 촉진자금(그 외 기타)","상생성장지원자금","그 외 기타","대리대출"];
 
+// ── BIZ-SCALE-START ──
+// (scripts/test-ann-match.mjs 가 이 표식 사이를 떼어내 실행한다. 지우지 말 것)
 // ═══════════════════════════════════════════════════════════════════════════
 // 📊 소기업/소상공인 규모 자동판정 (참고용) + 중진공·소진공 신청가능 추정
 // ⚠️ 업종 키워드 매칭은 100% 정확하지 않으니 "참고용 배지"로만 사용하세요.
@@ -945,6 +947,102 @@ function judgeSososang(company) {
     reason: "상시근로자 " + emp + "명 " + (isSo ? "<" : "≥") + " 기준 " + limit + "명 (" + groupLabel + ")",
   };
 }
+// ── BIZ-SCALE-END ──
+
+// ══════════════════════════════════════════════════════════════════════════
+// 📢 공고 매칭 엔진 — 순수 함수만. supabase·React 를 부르지 않는다.
+//    scripts/test-ann-match.mjs 가 아래 표식 사이를 통째로 떼어내 실제 DB 덤프로 실행한다.
+//    ⚠️ 이 블록 안에서 App.js 의 다른 것을 참조하려면 BIZ-SCALE 블록 안에 있어야 한다.
+// ══════════════════════════════════════════════════════════════════════════
+// ── ANN-ENGINE-START ──
+// 시도 별칭 → 표준 시도명. 길이 내림차순으로 정렬해 두므로(아래 sort) "서울"이 "서울특별시"를 먼저 먹지 않는다.
+// ⚠️ bare "광주"·"경기"도 넣는다. 시도 자리에 온 값만 여기로 들어오고,
+//    `경기 광주`(경기도 광주시) ↔ `광주광역시` 충돌은 annRegionState 가 시도와 쌍으로 비교해 막는다.
+const ANN_SIDO_ALIAS = [
+  ["서울특별시", "서울"], ["서울시", "서울"], ["서울", "서울"],
+  ["부산광역시", "부산"], ["부산시", "부산"], ["부산", "부산"],
+  ["대구광역시", "대구"], ["대구시", "대구"], ["대구", "대구"],
+  ["인천광역시", "인천"], ["인천시", "인천"], ["인천", "인천"],
+  ["광주광역시", "광주"], ["광주시", "광주"], ["광주", "광주"],
+  ["대전광역시", "대전"], ["대전시", "대전"], ["대전", "대전"],
+  ["울산광역시", "울산"], ["울산시", "울산"], ["울산", "울산"],
+  ["세종특별자치시", "세종"], ["세종시", "세종"], ["세종", "세종"],
+  ["경기도", "경기"], ["경기", "경기"],
+  ["강원특별자치도", "강원"], ["강원도", "강원"], ["강원", "강원"],
+  ["충청북도", "충북"], ["충북", "충북"],
+  ["충청남도", "충남"], ["충남", "충남"],
+  ["전북특별자치도", "전북"], ["전라북도", "전북"], ["전북", "전북"],
+  ["전라남도", "전남"], ["전남", "전남"],
+  ["경상북도", "경북"], ["경북", "경북"],
+  ["경상남도", "경남"], ["경남", "경남"],
+  ["제주특별자치도", "제주"], ["제주도", "제주"], ["제주", "제주"],
+].sort(function (a, b) { return b[0].length - a[0].length; });
+
+// 시군구 접미사 제거 — 떼고도 글자가 남을 때만 뗀다("중구"→"중", "구"→"구").
+function annTrimGu(raw) {
+  var t = String(raw || "").trim();
+  if (!t) return "";
+  var m = t.match(/^(.+?)(시|군|구)$/);
+  return m && m[1] ? m[1] : t;
+}
+
+// 공고가 시(市) 아래 구·읍·면·동까지 한정하는가. 그러면 우리 데이터(시 단위)로는 확정할 수 없다.
+function annDeeperThanCity(sigunguRaw) {
+  return /(시|군)\s*\S+(구|읍|면|동)$/.test(String(sigunguRaw || "").trim());
+}
+
+// 지역 문자열 → { sido, sigungu }.
+// ⚠️ 세 출처(CRM `서울_강남` · 공고 `서울특별시 강남구` · 서류 도로명주소)가 **같은 함수를
+//    통과**해야 비교가 성립한다. 한쪽만 정규화하면 어긋난다.
+// ⚠️ 시도를 못 읽으면 빈 값을 돌려준다 — 추측하지 않는다(호출부가 unknown 으로 받는다).
+function normRegion(raw) {
+  var s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return { sido: "", sigungu: "" };
+  var parts = s.split(/[_/,·|\s]+/).filter(Boolean);
+  var sido = "", i;
+
+  for (i = 0; i < ANN_SIDO_ALIAS.length; i++) {
+    if (parts[0] === ANN_SIDO_ALIAS[i][0]) { sido = ANN_SIDO_ALIAS[i][1]; break; }
+  }
+  if (!sido) {
+    // 붙여 쓴 경우("서울특별시강남구") — 앞에서부터 가장 긴 별칭을 찾는다
+    for (i = 0; i < ANN_SIDO_ALIAS.length; i++) {
+      if (s.indexOf(ANN_SIDO_ALIAS[i][0]) === 0) {
+        sido = ANN_SIDO_ALIAS[i][1];
+        parts = [ANN_SIDO_ALIAS[i][0]].concat(
+          s.slice(ANN_SIDO_ALIAS[i][0].length).split(/[_/,·|\s]+/).filter(Boolean));
+        break;
+      }
+    }
+  }
+  if (!sido) return { sido: "", sigungu: "" };
+  return { sido: sido, sigungu: annTrimGu(parts[1] || "") };
+}
+
+// 지역 조건 판정. includeList 가 비면 전국이라 전원 pass.
+// ⚠️ 반드시 시도와 쌍으로 비교한다 — `경기 광주`와 `광주광역시`는 시군구만 보면 같아진다.
+function annRegionState(coRegion, includeList) {
+  if (!includeList || !includeList.length) return "pass";
+  var co = normRegion(coRegion);
+  if (!co.sido) return "unknown";
+  var sidoHit = false, deeper = false;
+  for (var i = 0; i < includeList.length; i++) {
+    var rawSg = String((includeList[i] && includeList[i].sigungu) || "");
+    var w = normRegion(String((includeList[i] && includeList[i].sido) || "") + " " + rawSg);
+    if (!w.sido || w.sido !== co.sido) continue;
+    sidoHit = true;
+    if (!w.sigungu) return "pass";                  // 공고가 시도까지만 요구
+    if (!co.sigungu) { deeper = true; continue; }   // 우리는 시도만 있다
+    if (w.sigungu === co.sigungu) {
+      if (annDeeperThanCity(rawSg)) { deeper = true; continue; }  // 시 아래 구까지 한정 → 확정 불가
+      return "pass";
+    }
+  }
+  if (deeper) return "unknown";
+  if (sidoHit) return co.sigungu ? "fail" : "unknown";
+  return "fail";
+}
+// ── ANN-ENGINE-END ──
 
 // 기관(중진공·소진공) 판정의 전제: 규모 판정이 확실해야 한다.
 // 소기업·소상공인 중 하나라도 unknown이면 기관 판정도 불가(eligible: null) — 사유 문자열 반환, 아니면 null.
