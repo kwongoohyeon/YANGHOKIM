@@ -1074,6 +1074,67 @@ function annIndustryState(coIndustry, industries) {
   }
   return "unknown";
 }
+
+// 규모 — 기존 판정 함수를 **그대로 호출**한다. 새 규모 판정을 만들지 말 것
+// (기업목록 규모 배지가 같은 함수를 본다. 두 벌이 되면 반드시 어긋난다).
+function annYesNo(s) { return s === "yes" ? "pass" : s === "no" ? "fail" : "unknown"; }
+function annScaleState(co, scale) {
+  if (!scale) return "pass";
+  if (scale === "소상공인") return annYesNo(judgeSososang(co).status);
+  if (scale === "소기업")   return annYesNo(judgeSmallBiz(co).status);
+  // ⚠️ 중소기업 — 우리 고객은 전원 중소기업이라는 전제로 통과시킨다.
+  //    확인한 게 아니라 전제다. annEvalCompany 가 notes 에 그 사실을 적는다.
+  if (scale === "중소기업") return "pass";
+  return "unknown";
+}
+
+// 매출 — companies.revenue_* 는 bigint 라 값이 잘리지 않는다(2026-08-30 확인).
+function annRevenueState(co, rev) {
+  if (!rev || (rev.min == null && rev.max == null)) return "pass";
+  var v = rev.basis === "3년평균"
+    ? bizAvgRevenue(co)
+    : (Number(co && co.revenue_2025) || Number(co && co.revenue_2024) || Number(co && co.revenue_2023) || null);
+  if (v == null || !(v > 0)) return "unknown";
+  if (rev.min != null && v < rev.min) return "fail";
+  if (rev.max != null && v > rev.max) return "fail";
+  return "pass";
+}
+
+// 업력 — todayYm = 연*100+월.
+// ⚠️ 설립월이 없으면 업력을 한 값으로 못 정한다(최대 11개월 오차).
+//    가능한 [최소, 최대] 범위로 재서, 범위가 기준선을 걸치면 unknown 으로 둔다.
+//    (실측: founded_year 는 있는데 founded_month 가 없는 기업이 1건뿐이라 영향은 작다)
+function annMonthsBetween(y, m, todayYm) {
+  return (Math.floor(todayYm / 100) - y) * 12 + ((todayYm % 100) - m);
+}
+function annAgeFits(months, age) {
+  if (age.min_months != null && months < age.min_months) return false;
+  if (age.max_months != null && months > age.max_months) return false;
+  return true;
+}
+function annAgeState(co, age, todayYm) {
+  if (!age || (age.min_months == null && age.max_months == null)) return "pass";
+  var y = parseInt(co && co.founded_year, 10);
+  if (!y || y < 1900) return "unknown";
+  var m = parseInt(co && co.founded_month, 10);
+  var lo, hi;                                   // 가능한 업력 개월 수의 [최소, 최대]
+  if (m >= 1 && m <= 12) { lo = hi = annMonthsBetween(y, m, todayYm); }
+  else { lo = annMonthsBetween(y, 12, todayYm); hi = annMonthsBetween(y, 1, todayYm); }
+  var okLo = annAgeFits(lo, age), okHi = annAgeFits(hi, age);
+  if (okLo && okHi) return "pass";
+  if (!okLo && !okHi) return "fail";
+  return "unknown";                             // 범위가 기준선을 걸친다 → 확정 불가
+}
+
+// 상시근로자 — 실측 142/404 만 채워져 있다. 없으면 unknown 이 정상이다.
+function annEmployeeState(co, emp) {
+  if (!emp || (emp.min == null && emp.max == null)) return "pass";
+  var n = parseInt(co && co.employee_count, 10);
+  if (isNaN(n)) return "unknown";
+  if (emp.min != null && n < emp.min) return "fail";
+  if (emp.max != null && n > emp.max) return "fail";
+  return "pass";
+}
 // ── ANN-ENGINE-END ──
 
 // 기관(중진공·소진공) 판정의 전제: 규모 판정이 확실해야 한다.

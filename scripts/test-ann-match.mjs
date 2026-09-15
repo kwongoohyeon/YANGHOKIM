@@ -25,6 +25,7 @@ console.log(`── 떼어낸 소스: 규모판정 ${bizSrc.trim().split("\n").l
 const EXPORTS = [
   "normRegion", "annTrimGu", "annDeeperThanCity", "annRegionState",
   "annIndustryTokens", "annIndustryState",
+  "annScaleState", "annRevenueState", "annAgeState", "annEmployeeState",
 ];
 const mod = new Function(bizSrc + "\n" + annSrc + "\nreturn {" + EXPORTS.join(",") + "};")();
 
@@ -102,6 +103,48 @@ eq("아무것도 안 걸림", I("음식점업", { include: ["제조"], exclude: 
 eq("우리 업종 비어있음", I("", { include: ["제조"], exclude: [] }),                "unknown");
 // ⚠️ exclude 만 있는 공고 — "제외 대상이 아님"을 확정하지 않는다
 eq("exclude 만 있고 안 걸림", I("도소매업", { include: [], exclude: ["유흥"] }),   "unknown");
+
+// ── annRevenueState ─────────────────────────────────────────────────────────
+const V = mod.annRevenueState;
+const co30 = { revenue_2023: 2800000000, revenue_2024: 3000000000, revenue_2025: 3200000000, industry: "제조업" };
+eq("매출 조건 없음",   V(co30, null),                                                    "pass");
+eq("상한 이내",        V(co30, { min: null, max: 12000000000, basis: "연매출" }),        "pass");
+eq("상한 초과",        V(co30, { min: null, max: 1000000000, basis: "연매출" }),         "fail");
+eq("하한 미달",        V(co30, { min: 10000000000, max: null, basis: "연매출" }),        "fail");
+eq("3년평균 기준",     V(co30, { min: null, max: 3100000000, basis: "3년평균" }),        "pass");
+eq("매출 없음",        V({ industry: "제조업" }, { min: null, max: 1000000000, basis: "연매출" }), "unknown");
+
+// ── annAgeState (오늘 = 2026-08 고정) ───────────────────────────────────────
+const A = mod.annAgeState, YM = 202608;
+eq("업력 조건 없음",   A({ founded_year: 2020, founded_month: 3 }, null, YM),                       "pass");
+eq("1년 이상 충족",    A({ founded_year: 2020, founded_month: 3 }, { min_months: 12 }, YM),         "pass");
+eq("1년 미만 미달",    A({ founded_year: 2026, founded_month: 5 }, { min_months: 12 }, YM),         "fail");
+eq("설립연도 없음",    A({}, { min_months: 12 }, YM),                                               "unknown");
+// ⚠️ 설립월이 없으면 최대 11개월 오차 → 기준선을 걸치면 unknown, 안 걸치면 확정한다
+eq("월없음·확실히 충족", A({ founded_year: 2020 }, { min_months: 12 }, YM),                          "pass");
+eq("월없음·확실히 미달", A({ founded_year: 2026 }, { min_months: 12 }, YM),                          "fail");
+eq("월없음·경계 걸침",   A({ founded_year: 2025 }, { min_months: 12 }, YM),                          "unknown");
+eq("업력 상한 초과",     A({ founded_year: 2010, founded_month: 1 }, { max_months: 84 }, YM),        "fail");
+
+// ── annEmployeeState ────────────────────────────────────────────────────────
+const E = mod.annEmployeeState;
+eq("근로자 조건 없음", E({ employee_count: 3 }, null),                  "pass");
+eq("상한 이내",        E({ employee_count: 3 }, { max: 5 }),            "pass");
+eq("상한 초과",        E({ employee_count: 9 }, { max: 5 }),            "fail");
+eq("하한 미달",        E({ employee_count: 3 }, { min: 5 }),            "fail");
+eq("미입력",           E({}, { max: 5 }),                               "unknown");
+
+// ── annScaleState (기존 judgeSmallBiz·judgeSososang 을 그대로 쓴다) ─────────
+const C = mod.annScaleState;
+const 소상 = { industry: "음식점업", revenue_2024: 300000000, employee_count: 3 };
+const 큰곳 = { industry: "음식점업", revenue_2024: 5000000000, employee_count: 40 };
+eq("규모 조건 없음",   C(소상, null),        "pass");
+eq("소상공인 해당",    C(소상, "소상공인"),  "pass");
+eq("소상공인 아님",    C(큰곳, "소상공인"),  "fail");
+eq("소기업 해당",      C(소상, "소기업"),    "pass");
+eq("근로자수 없으면 불가", C({ industry: "음식점업", revenue_2024: 300000000 }, "소상공인"), "unknown");
+eq("업종 없으면 불가", C({ revenue_2024: 300000000, employee_count: 3 }, "소기업"),          "unknown");
+eq("중소기업은 통과",  C(소상, "중소기업"),  "pass");
 
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass}/${pass + fail} 통과`);
 process.exit(fail === 0 ? 0 : 1);
