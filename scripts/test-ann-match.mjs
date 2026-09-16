@@ -10,6 +10,17 @@ import { fileURLToPath } from "url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = fs.readFileSync(path.join(ROOT, "src/App.js"), "utf8");
 
+// 실제 companies 덤프 대조는 **조건부**다 — 운영 DB 쿼리는 이 태스크 범위 밖(금지)이라
+// 브리프 원문의 run-sql.js 직접 조회 대신, 미리 떠 둔 덤프 파일이 있을 때만 읽는다.
+// 파일: 배열(JSON) · id·region·industry·revenue_*·employee_count·founded_year·founded_month·
+//       export_usd·social_enterprise·innovation_field·biz_match_override 컬럼 한정.
+// 없으면 "미실행"으로 표시하고 통과 개수에 넣지 않는다 — 조용히 통과시키지 않는다.
+const DUMP_PATH = path.join(ROOT, ".superpowers/sdd/2026-08-30-공고매칭-1A/companies-dump.json");
+function loadCompaniesDump() {
+  if (!fs.existsSync(DUMP_PATH)) return null;
+  return JSON.parse(fs.readFileSync(DUMP_PATH, "utf8"));
+}
+
 function slice(startMark, endMark) {
   const a = src.indexOf(startMark);
   const b = src.indexOf(endMark);
@@ -26,6 +37,7 @@ const EXPORTS = [
   "normRegion", "annTrimGu", "annDeeperThanCity", "annRegionState",
   "annIndustryTokens", "annIndustryState",
   "annScaleState", "annRevenueState", "annAgeState", "annEmployeeState",
+  "annEvalCompany", "annRunMatch", "ANN_ENGINE_VERSION",
 ];
 const mod = new Function(bizSrc + "\n" + annSrc + "\nreturn {" + EXPORTS.join(",") + "};")();
 
@@ -145,6 +157,60 @@ eq("소기업 해당",      C(소상, "소기업"),    "pass");
 eq("근로자수 없으면 불가", C({ industry: "음식점업", revenue_2024: 300000000 }, "소상공인"), "unknown");
 eq("업종 없으면 불가", C({ revenue_2024: 300000000, employee_count: 3 }, "소기업"),          "unknown");
 eq("중소기업은 통과",  C(소상, "중소기업"),  "pass");
+
+// ── annEvalCompany / annRunMatch ────────────────────────────────────────────
+const COND = {
+  version: 1,
+  regions:    { include: [{ sido: "서울특별시", sigungu: "강남구" }] },
+  industries: { include: ["제조"], exclude: ["유흥"] },
+  scale:      "소기업",
+  revenue:    { min: null, max: 12000000000, basis: "연매출" },
+  age:        { min_months: 12, max_months: null },
+  employees:  null,
+  excludes_text: ["국세·지방세 체납"],
+};
+const 유력업체 = { id: "c1", name: "가제조", region: "서울_강남", industry: "제조업",
+                   revenue_2024: 3000000000, founded_year: 2019, founded_month: 4, assignee: "관호" };
+const 애매업체 = { id: "c2", name: "나상사", region: "서울_강남", industry: "도소매업",
+                   revenue_2024: 3000000000, founded_year: 2019, founded_month: 4, assignee: "관호" };
+const 제외업체 = { id: "c3", name: "다식당", region: "경기_시흥", industry: "음식점업",
+                   revenue_2024: 300000000, founded_year: 2019, founded_month: 4, assignee: "관호" };
+
+const e1 = mod.annEvalCompany(유력업체, COND, 202608);
+eq("유력 판정",       e1.verdict, "유력");
+eq("유력은 검사 6개", e1.checks.length, 6);
+const e2 = mod.annEvalCompany(애매업체, COND, 202608);
+eq("애매 판정",       e2.verdict, "애매");
+eq("애매 사유는 업종", e2.checks.filter(c => c.state === "unknown").map(c => c.key), ["industry"]);
+const e3 = mod.annEvalCompany(제외업체, COND, 202608);
+eq("제외 판정",       e3.verdict, "제외");
+// ⚠️ 코드로 못 재는 제외조건은 판정을 바꾸지 않고 notes 로만 남긴다
+eq("제외조건은 메모로", e1.notes.some(n => n.indexOf("국세") >= 0), true);
+eq("업종 제외어 미확인 메모", e1.notes.some(n => n.indexOf("유흥") >= 0), true);
+
+const run = mod.annRunMatch([유력업체, 애매업체, 제외업체, { id: "x", name: "지운곳", deleted_at: "2026-01-01" }], COND, "관호");
+eq("삭제 기업 제외",  run.rows.length, 3);
+eq("집계",            run.summary.counts, { 유력: 1, 애매: 1, 제외: 1 });
+eq("엔진 버전",       run.summary.engine, mod.ANN_ENGINE_VERSION);
+eq("정렬: 유력 먼저", run.rows.map(r => r.verdict), ["유력", "애매", "제외"]);
+// ⚠️ 제외 행은 떨어진 조건 1개만 담는다 — 404개 × 6조건을 jsonb 에 넣지 않는다
+eq("제외 행은 1개만", run.rows[2].checks.length, 1);
+eq("제외 행은 fail만", run.rows[2].checks[0].state, "fail");
+
+// ── 실제 DB 로 회귀 확인 (조건부 — 덤프 파일이 있을 때만) ──────────────────
+// "전 조건이 비어 있는 공고"는 살아있는 기업 전부가 유력이어야 한다.
+// 엔진이 조용히 업체를 흘리는지 보는 안전망이다.
+// ⚠️ 운영 DB 쿼리는 이 태스크 범위 밖이라, 덤프 파일이 없으면 미실행으로 표시하고
+//    통과 개수에 넣지 않는다(조용히 통과시키지 않는다).
+const dump = loadCompaniesDump();
+if (dump) {
+  const all = mod.annRunMatch(dump, { version: 1 }, "test");
+  eq("빈 조건이면 전원 유력", all.summary.counts.애매 + all.summary.counts.제외, 0);
+  eq("빈 조건이면 전원 포함", all.rows.length, dump.length);
+  console.log(`   (실제 DB 살아있는 기업 ${dump.length}개로 확인)`);
+} else {
+  console.log("⏭ 실덤프 대조: 덤프 없음 — 미실행");
+}
 
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass}/${pass + fail} 통과`);
 process.exit(fail === 0 ? 0 : 1);

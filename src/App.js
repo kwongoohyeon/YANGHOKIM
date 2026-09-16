@@ -1135,6 +1135,102 @@ function annEmployeeState(co, emp) {
   if (emp.max != null && n > emp.max) return "fail";
   return "pass";
 }
+
+// 엔진이 바뀌면 옛 결과와 새 결과를 구분할 수 있어야 한다. 판정 규칙을 고치면 이 숫자를 올릴 것.
+const ANN_ENGINE_VERSION = 1;
+
+function annWon(v) {
+  var n = Number(v);
+  return n > 0 ? (n / 1e8).toFixed(1) + "억" : "";
+}
+function annWantRegion(c) {
+  var list = ((c.regions || {}).include) || [];
+  if (!list.length) return "전국";
+  return list.map(function (r) { return ((r && r.sido) || "") + " " + ((r && r.sigungu) || ""); })
+             .join(" · ").trim();
+}
+
+// 업체 하나 판정.
+// 종합 규칙: fail 하나라도 → 제외 / fail 없고 unknown 없음 → 유력 / 나머지 → 애매.
+// ⚠️ "확실" 등급은 만들지 않는다 — 서류로 확인해야 의미가 있고 그건 2차다.
+function annEvalCompany(co, cond, todayYm) {
+  var c = cond || {};
+  var rev = c.revenue || null, age = c.age || null, emp = c.employees || null;
+  var checks = [
+    { key: "region", label: "지역", state: annRegionState(co && co.region, (c.regions || {}).include),
+      got: (co && co.region) || "", want: annWantRegion(c) },
+    { key: "industry", label: "업종", state: annIndustryState(co && co.industry, c.industries),
+      got: (co && co.industry) || "", want: (((c.industries || {}).include) || []).join(" · ") || "제한 없음" },
+    { key: "scale", label: "규모", state: annScaleState(co, c.scale),
+      got: "", want: c.scale || "제한 없음" },
+    { key: "revenue", label: "매출", state: annRevenueState(co, rev),
+      got: annWon((co && co.revenue_2025) || (co && co.revenue_2024) || (co && co.revenue_2023)),
+      want: rev ? ((rev.min != null ? annWon(rev.min) + " 이상 " : "") + (rev.max != null ? annWon(rev.max) + " 이하" : "")).trim() : "제한 없음" },
+    { key: "age", label: "업력", state: annAgeState(co, age, todayYm),
+      got: (co && co.founded_year) ? (co.founded_year + "년" + (co.founded_month ? " " + co.founded_month + "월" : "")) : "",
+      want: age ? ((age.min_months != null ? age.min_months + "개월 이상 " : "") + (age.max_months != null ? age.max_months + "개월 이하" : "")).trim() : "제한 없음" },
+    { key: "employees", label: "상시근로자", state: annEmployeeState(co, emp),
+      got: (co && co.employee_count != null) ? String(co.employee_count) + "명" : "",
+      want: emp ? ((emp.min != null ? emp.min + "명 이상 " : "") + (emp.max != null ? emp.max + "명 이하" : "")).trim() : "제한 없음" },
+  ];
+
+  var hasFail = false, hasUnknown = false;
+  for (var i = 0; i < checks.length; i++) {
+    if (checks[i].state === "fail") hasFail = true;
+    else if (checks[i].state === "unknown") hasUnknown = true;
+  }
+  var verdict = hasFail ? "제외" : (hasUnknown ? "애매" : "유력");
+
+  // ⚠️ 아래 메모는 **판정을 바꾸지 않는다.** 코드로 잴 수 없는 조건을 사람에게 넘기는 것이다.
+  //    판정에 반영하면(전부 애매로 내리면) 기능이 죽고, 통과로 세면 거짓말이 된다.
+  var notes = [];
+  var exc = ((c.industries || {}).exclude) || [];
+  var indState = checks[1].state;
+  if (exc.length && indState !== "fail") {
+    notes.push("⚠ 제외조건 미확인: " + exc.join(" · "));
+  }
+  ((c.excludes_text) || []).forEach(function (t) { if (t) notes.push("⚠ 확인 필요: " + t); });
+  if (c.scale === "중소기업") {
+    notes.push("ℹ 중소기업 여부는 확인하지 않았습니다(우리 고객은 전원 중소기업 전제)");
+  }
+  return { verdict: verdict, checks: checks, notes: notes };
+}
+
+// 전체 매칭. **supabase 를 부르지 않는다** — companies 는 이미 메모리에 있다.
+// 그래서 재매칭이 즉시이고 비용이 0이다.
+function annRunMatch(companies, cond, ranBy) {
+  var kst = new Date(Date.now() + 9 * 3600 * 1000);
+  var todayYm = kst.getUTCFullYear() * 100 + (kst.getUTCMonth() + 1);
+  var counts = { 유력: 0, 애매: 0, 제외: 0 };
+  var rows = [];
+  (companies || []).forEach(function (co) {
+    if (!co || co.deleted_at) return;
+    var r = annEvalCompany(co, cond, todayYm);
+    counts[r.verdict] += 1;
+    // ⚠️ 제외 행은 떨어진 조건 1개만 담는다.
+    //    전부 담으면 404개 × 6조건이 match_rows jsonb 에 들어간다(설계 §7-5).
+    var isOut = r.verdict === "제외";
+    rows.push({
+      company_id: co.id, name: co.name || "", assignee: co.assignee || "",
+      verdict: r.verdict,
+      checks: isOut ? r.checks.filter(function (x) { return x.state === "fail"; }).slice(0, 1) : r.checks,
+      notes: isOut ? [] : r.notes,
+    });
+  });
+  var order = { "유력": 0, "애매": 1, "제외": 2 };
+  rows.sort(function (a, b) {
+    if (order[a.verdict] !== order[b.verdict]) return order[a.verdict] - order[b.verdict];
+    var au = a.checks.filter(function (x) { return x.state === "unknown"; }).length;
+    var bu = b.checks.filter(function (x) { return x.state === "unknown"; }).length;
+    if (au !== bu) return au - bu;                       // 모르는 게 적은 업체를 위로
+    return (a.name || "").localeCompare(b.name || "", "ko");
+  });
+  return {
+    summary: { ranAt: new Date().toISOString(), ranBy: ranBy || "",
+               engine: ANN_ENGINE_VERSION, counts: counts },
+    rows: rows,
+  };
+}
 // ── ANN-ENGINE-END ──
 
 // 기관(중진공·소진공) 판정의 전제: 규모 판정이 확실해야 한다.
