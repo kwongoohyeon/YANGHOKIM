@@ -95,6 +95,21 @@ eq("시 아래 구 한정",  S("경기_고양", [{ sido: "경기도", sigungu: "
 // ⚠️ 광주 오탐 — 시도가 다르면 시군구가 같아도 불일치
 eq("광주 오탐 방지",   S("경기_광주", [{ sido: "광주광역시", sigungu: "" }]),      "fail");
 
+// ── C1: 공고 지역을 해석 못 하면 unknown — fail 로 새서 전원 제외되면 안 된다 ──
+// (최종 리뷰 Critical C1 재현 입력 그대로)
+eq("C1 sido 빈값",        S("서울_강남", [{ sido: "", sigungu: "강남구" }]),   "unknown");
+eq("C1 문자열 항목(일치)", S("서울_강남", ["서울특별시 강남구"]),               "pass");
+eq("C1 문자열 항목(불일치)", S("경기_수원", ["서울특별시 강남구"]),             "fail");
+eq("C1 전국",              S("서울_강남", [{ sido: "전국" }]),                  "unknown");
+eq("C1 수도권",            S("서울_강남", [{ sido: "수도권" }]),                "unknown");
+eq("C1 별칭표 밖 표기",    S("서울_강남", [{ sido: "서울 특별시" }]),           "unknown");
+
+// ── C2: 자치구 있는 시 — "시" 없이 구만 오면 우리 시 단위 데이터로는 확정 불가 ──
+eq("C2 고양·덕양구",       S("경기_고양", [{ sido: "경기", sigungu: "덕양구" }]), "unknown");
+eq("C2 성남·분당구",       S("경기_성남", [{ sido: "경기", sigungu: "분당구" }]), "unknown");
+// ⚠️ 광역시 자치구는 우리 값도 이미 구 단위라 그대로 정상 비교(fail)돼야 한다 — 회귀 방지
+eq("C2 광역시 자치구는 그대로 fail", S("서울_강남", [{ sido: "서울특별시", sigungu: "종로구" }]), "fail");
+
 // ── annIndustryTokens ───────────────────────────────────────────────────────
 eq("단일 업종",   mod.annIndustryTokens("제조업"),                    ["제조업"]);
 eq("콤마 다중",   mod.annIndustryTokens("도소매업, 제조업, 건설업"),  ["도소매업", "제조업", "건설업"]);
@@ -115,6 +130,13 @@ eq("아무것도 안 걸림", I("음식점업", { include: ["제조"], exclude: 
 eq("우리 업종 비어있음", I("", { include: ["제조"], exclude: [] }),                "unknown");
 // ⚠️ exclude 만 있는 공고 — "제외 대상이 아님"을 확정하지 않는다
 eq("exclude 만 있고 안 걸림", I("도소매업", { include: [], exclude: ["유흥"] }),   "unknown");
+
+// ── I1: exclude 부분일치 오탐 — "문자열 안에 들어 있기만" 한 건 fail 이 아니다 ──
+// (최종 리뷰 Important I1 재현 입력 그대로)
+eq("I1 음식료품≠음식",   I("음식료품 도매업", { include: [], exclude: ["음식"] }),         "unknown");
+eq("I1 숙박예약≠숙박",   I("숙박예약 플랫폼 개발업", { include: [], exclude: ["숙박"] }),   "unknown");
+// ⚠️ 진짜 업종명(단어 자체 또는 "키워드+업/점" 수준)은 그대로 fail — 회귀 방지
+eq("I1 진짜 업종명은 그대로 fail", I("유흥주점업", { include: [], exclude: ["유흥"] }),      "fail");
 
 // ── annRevenueState ─────────────────────────────────────────────────────────
 const V = mod.annRevenueState;
@@ -152,11 +174,22 @@ const 소상 = { industry: "음식점업", revenue_2024: 300000000, employee_cou
 const 큰곳 = { industry: "음식점업", revenue_2024: 5000000000, employee_count: 40 };
 eq("규모 조건 없음",   C(소상, null),        "pass");
 eq("소상공인 해당",    C(소상, "소상공인"),  "pass");
-eq("소상공인 아님",    C(큰곳, "소상공인"),  "fail");
+// ⚠️ 최종 리뷰 I2(Ruling 5)로 기대값 변경: 이 no 는 업종 키워드·매출 기반 자동판정이라
+//    "확실히 아님"의 근거가 못 된다 — biz_match_override 로 온 값이 아니면 unknown 이어야 한다.
+eq("소상공인 아님(자동판정→unknown)", C(큰곳, "소상공인"),  "unknown");
 eq("소기업 해당",      C(소상, "소기업"),    "pass");
 eq("근로자수 없으면 불가", C({ industry: "음식점업", revenue_2024: 300000000 }, "소상공인"), "unknown");
 eq("업종 없으면 불가", C({ revenue_2024: 300000000, employee_count: 3 }, "소기업"),          "unknown");
 eq("중소기업은 통과",  C(소상, "중소기업"),  "pass");
+
+// ── I2: "참고용 배지" no 가 확정 제외로 승격되면 안 된다 ────────────────────
+// (최종 리뷰 Important I2 재현 입력 그대로 — 산업교육 컨설팅업은 "교육" 키워드가
+//  생활서비스 10억 티어에 걸려 no 가 나오지만, 실제로는 전문서비스 30억 기준일 수 있다)
+const 오분류업체 = { industry: "산업교육 컨설팅업", revenue_2024: 1500000000, employee_count: 10 };
+eq("I2 업종키워드 no는 unknown(소기업)", C(오분류업체, "소기업"), "unknown");
+// ⚠️ 수동 보정(biz_match_override)에서 온 no 는 그대로 확정 fail — 회귀 방지
+const 수동중기업 = { industry: "산업교육 컨설팅업", revenue_2024: 1500000000, biz_match_override: { grade: "중소기업" } };
+eq("I2 수동보정 no는 그대로 fail(소기업)", C(수동중기업, "소기업"), "fail");
 
 // ── annEvalCompany / annRunMatch ────────────────────────────────────────────
 const COND = {
@@ -188,10 +221,18 @@ eq("제외 판정",       e3.verdict, "제외");
 eq("제외조건은 메모로", e1.notes.some(n => n.indexOf("국세") >= 0), true);
 eq("업종 제외어 미확인 메모", e1.notes.some(n => n.indexOf("유흥") >= 0), true);
 
+// ── I2(계속): annEvalCompany 레벨 — 자동판정 no 는 제외가 아니라 애매 + 근거 메모 ──
+const COND_SCALE_ONLY = { version: 1, scale: "소기업" };
+const 오분류업체2 = { id: "c9", name: "라컨설팅", region: "", industry: "산업교육 컨설팅업", revenue_2024: 1500000000 };
+const e4 = mod.annEvalCompany(오분류업체2, COND_SCALE_ONLY, 202608);
+eq("I2 자동추정 no는 제외 아닌 애매", e4.verdict, "애매");
+eq("I2 확정불가 근거 메모", e4.notes.some(n => n.indexOf("규모기준이 업종 키워드 추정") >= 0), true);
+
 const run = mod.annRunMatch([유력업체, 애매업체, 제외업체, { id: "x", name: "지운곳", deleted_at: "2026-01-01" }], COND, "관호");
 eq("삭제 기업 제외",  run.rows.length, 3);
 eq("집계",            run.summary.counts, { 유력: 1, 애매: 1, 제외: 1 });
-eq("엔진 버전",       run.summary.engine, mod.ANN_ENGINE_VERSION);
+// ⚠️ I3: 이전엔 떼어낸 값과 자기 자신을 비교하는 항상-참 단언이었다. 실제 계약(버전=1)을 확인한다.
+eq("엔진 버전",       run.summary.engine, 1);
 eq("정렬: 유력 먼저", run.rows.map(r => r.verdict), ["유력", "애매", "제외"]);
 // ⚠️ 제외 행은 떨어진 조건 1개만 담는다 — 404개 × 6조건을 jsonb 에 넣지 않는다
 eq("제외 행은 1개만", run.rows[2].checks.length, 1);

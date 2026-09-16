@@ -1019,17 +1019,38 @@ function normRegion(raw) {
   return { sido: sido, sigungu: annTrimGu(parts[1] || "") };
 }
 
+// 광역시(+세종)의 자치구는 우리 데이터도 이미 구 단위라("서울_강남") 정상 비교가 성립한다.
+// 그 밖의 도(道) 지역은 우리 데이터가 시 단위뿐이라("경기_고양") 공고가 구를 요구하면 확정할 수 없다.
+var ANN_METRO_SIDO = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종"];
+
 // 지역 조건 판정. includeList 가 비면 전국이라 전원 pass.
 // ⚠️ 반드시 시도와 쌍으로 비교한다 — `경기 광주`와 `광주광역시`는 시군구만 보면 같아진다.
+// ⚠️ include 항목을 하나도 해석 못 하면(빈 sido·별칭표 밖 표기 등) "fail"이 아니라 "unknown"이다 —
+//    그건 "공고 조건을 못 읽었다"이지 "기업이 못 미친다"가 아니다(2026-09-16 최종 리뷰 C1).
 function annRegionState(coRegion, includeList) {
   if (!includeList || !includeList.length) return "pass";
   var co = normRegion(coRegion);
   if (!co.sido) return "unknown";
-  var sidoHit = false, deeper = false;
+  var sidoHit = false, deeper = false, validCount = 0;
   for (var i = 0; i < includeList.length; i++) {
-    var rawSg = String((includeList[i] && includeList[i].sigungu) || "");
-    var w = normRegion(String((includeList[i] && includeList[i].sido) || "") + " " + rawSg);
-    if (!w.sido || w.sido !== co.sido) continue;
+    var raw = includeList[i], w, rawSg;
+    if (typeof raw === "string") {
+      // 공고 항목이 {sido,sigungu} 쌍이 아니라 통짜 문자열로 온 경우 — 있는 normRegion 으로 해석한다.
+      w = normRegion(raw);
+      if (!w.sido) continue;                        // 해석 불가 — 유효 항목이 아니다
+      rawSg = w.sigungu;
+      validCount++;
+    } else {
+      var rawSido = String((raw && raw.sido) || "");
+      rawSg = String((raw && raw.sigungu) || "");
+      // sido 필드 자체를 단독으로 해석해 본다 — "전국"·"수도권"처럼 별칭표에 없거나,
+      // "서울 특별시"처럼 잡음이 섞여 sido 하나로 안 끝나면 유효 항목으로 세지 않는다.
+      var sidoOnly = normRegion(rawSido);
+      if (!sidoOnly.sido || sidoOnly.sigungu) continue;
+      validCount++;
+      w = normRegion(rawSido + " " + rawSg);
+    }
+    if (w.sido !== co.sido) continue;
     sidoHit = true;
     if (!w.sigungu) return "pass";                  // 공고가 시도까지만 요구
     if (!co.sigungu) { deeper = true; continue; }   // 우리는 시도만 있다
@@ -1037,7 +1058,12 @@ function annRegionState(coRegion, includeList) {
       if (annDeeperThanCity(rawSg)) { deeper = true; continue; }  // 시 아래 구까지 한정 → 확정 불가
       return "pass";
     }
+    // ⚠️ 공고가 구 단위를 요구하는데 우리는 시 단위뿐인 도(道) 지역 — 그 구가 어디 밑인지 알 수 없다
+    //    (성남·고양·수원·용인·안산·안양·창원·청주 등, 2026-09-16 최종 리뷰 C2).
+    //    광역시 자치구는 위에서 이미 정상 비교가 끝났으므로 여기 안 온다.
+    if (/구$/.test(rawSg) && ANN_METRO_SIDO.indexOf(co.sido) < 0) { deeper = true; continue; }
   }
+  if (validCount === 0) return "unknown";           // 공고 지역 조건을 하나도 못 읽었다
   if (deeper) return "unknown";
   if (sidoHit) return co.sigungu ? "fail" : "unknown";
   return "fail";
@@ -1052,12 +1078,29 @@ function annIndustryTokens(raw) {
     .filter(Boolean);
 }
 
+// exclude 전용 — 토큰(공백까지 쪼갠 낱말) 단위로 좁힌 부분일치.
+// "문자열 안에 들어 있기만" 한 오탐(음식료품≠음식, 숙박예약≠숙박)을 fail 로 올리지 않는다
+// (2026-09-16 최종 리뷰 I1). 낱말 전체가 키워드와 같거나, 키워드로 시작하고 뒤에
+// 업/점/업종 같은 짧은 접미사만 남는 수준일 때만 매치로 본다.
+var ANN_EXCLUDE_SUFFIX_RE = /(업|점|업종)$/;
+function annExcludeHit(tok, kw) {
+  var words = String(tok || "").split(/\s+/).filter(Boolean);
+  for (var j = 0; j < words.length; j++) {
+    var w = words[j];
+    if (w === kw) return true;
+    if (w.indexOf(kw) === 0 && ANN_EXCLUDE_SUFFIX_RE.test(w.slice(kw.length))) return true;
+  }
+  return false;
+}
+
 // 업종 조건 판정.
 // ⚠️ 이 기능에서 제일 약한 고리다 — 우리에겐 KSIC 업종코드가 없고 자유텍스트 99종뿐이다.
 // ⚠️ **"걸린 게 없다"를 fail 로 만들지 말 것.** 그건 "아니다"가 아니라 "모른다"이다(설계 §7-2).
 //    금속가공업이 제조업인 줄 우리 코드는 모른다 — fail 로 두면 멀쩡한 업체가 조용히 사라진다.
 //    대신 추출 프롬프트가 include 키워드를 넉넉히(동의어·하위업종) 뽑게 해서 unknown 을 줄인다.
 // ⚠️ exclude 가 include 보다 세다. 둘 다 걸리면 fail 이다.
+// ⚠️ exclude 는 확실할 때만 fail — annExcludeHit 로 좁힌다. include 부분일치는 그대로 둔다
+//    (include 오탐은 "unknown"이 아니라 "pass" 방향으로 새므로 위험도가 다르다 — I1은 exclude 전용).
 function annIndustryState(coIndustry, industries) {
   var inc = (industries && industries.include) || [];
   var exc = (industries && industries.exclude) || [];
@@ -1065,9 +1108,12 @@ function annIndustryState(coIndustry, industries) {
   var toks = annIndustryTokens(coIndustry);
   if (!toks.length) return "unknown";                   // 우리 업종이 비어 있다
   var hay = toks.join(" ");
-  var i;
+  var i, t;
   for (i = 0; i < exc.length; i++) {
-    if (exc[i] && hay.indexOf(String(exc[i])) >= 0) return "fail";
+    if (!exc[i]) continue;
+    for (t = 0; t < toks.length; t++) {
+      if (annExcludeHit(toks[t], String(exc[i]))) return "fail";
+    }
   }
   for (i = 0; i < inc.length; i++) {
     if (inc[i] && hay.indexOf(String(inc[i])) >= 0) return "pass";
@@ -1078,10 +1124,20 @@ function annIndustryState(coIndustry, industries) {
 // 규모 — 기존 판정 함수를 **그대로 호출**한다. 새 규모 판정을 만들지 말 것
 // (기업목록 규모 배지가 같은 함수를 본다. 두 벌이 되면 반드시 어긋난다).
 function annYesNo(s) { return s === "yes" ? "pass" : s === "no" ? "fail" : "unknown"; }
+// ⚠️ judgeSmallBiz/judgeSososang 의 "no"는 수동 보정(manual)이 아니면 업종 키워드·매출 추정일
+//    뿐이다("참고용 배지" — bizScaleCap 주석 참고). "확실히 아님"의 근거가 못 되므로 확정 fail 은
+//    수동 보정에서 온 no 뿐이고, 자동판정 no 는 unknown 으로 낮춘다(2026-09-16 최종 리뷰 I2, Ruling 5).
+function annScaleAutoNo(judge) { return judge.status === "no" && !judge.manual; }
 function annScaleState(co, scale) {
   if (!scale) return "pass";
-  if (scale === "소상공인") return annYesNo(judgeSososang(co).status);
-  if (scale === "소기업")   return annYesNo(judgeSmallBiz(co).status);
+  if (scale === "소상공인") {
+    var so = judgeSososang(co);
+    return annScaleAutoNo(so) ? "unknown" : annYesNo(so.status);
+  }
+  if (scale === "소기업") {
+    var sm = judgeSmallBiz(co);
+    return annScaleAutoNo(sm) ? "unknown" : annYesNo(sm.status);
+  }
   // ⚠️ 중소기업 — 우리 고객은 전원 중소기업이라는 전제로 통과시킨다.
   //    확인한 게 아니라 전제다. annEvalCompany 가 notes 에 그 사실을 적는다.
   if (scale === "중소기업") return "pass";
@@ -1192,6 +1248,13 @@ function annEvalCompany(co, cond, todayYm) {
   ((c.excludes_text) || []).forEach(function (t) { if (t) notes.push("⚠ 확인 필요: " + t); });
   if (c.scale === "중소기업") {
     notes.push("ℹ 중소기업 여부는 확인하지 않았습니다(우리 고객은 전원 중소기업 전제)");
+  }
+  // ⚠️ 규모 "no"가 자동판정(업종 키워드·매출 추정)이라 unknown 으로 낮아졌으면 왜 확정 못 했는지 남긴다.
+  if (c.scale === "소상공인" || c.scale === "소기업") {
+    var scaleJudge = c.scale === "소상공인" ? judgeSososang(co) : judgeSmallBiz(co);
+    if (annScaleAutoNo(scaleJudge)) {
+      notes.push("⚠ 규모기준이 업종 키워드 추정이라 확정 불가(" + c.scale + ")");
+    }
   }
   return { verdict: verdict, checks: checks, notes: notes };
 }
